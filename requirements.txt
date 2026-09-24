@@ -1,0 +1,11 @@
+# Зависимости SDR Scan.
+# Требуется Python 3.10..3.13 (в 3.14 нет wheel'ов для uhd).
+numpy>=1.24
+pyqtgraph>=0.13
+PyQt5>=5.15.9
+
+# UHD ставится ОТДЕЛЬНО, потому что его wheel'ы привязаны к версии Python
+# и (на Windows) требуют установленного UHD-инсталлятора (uhd.dll):
+#     pip install uhd==4.10.0.0
+# На Linux UHD ставится из пакетов: sudo apt install libuhd-dev uhd-host python3-uhd
+# Подробности - в README.md, раздел «Установка».

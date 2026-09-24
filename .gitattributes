@@ -1,0 +1,9 @@
+# Нормализация переводов строк: в репозитории всегда LF,
+# чтобы shell-скрипты корректно работали на Linux.
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.png binary
+*.iq binary
