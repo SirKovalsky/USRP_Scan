@@ -25,8 +25,14 @@ def main() -> int:
         import uhd
     except Exception as exc:  # noqa: BLE001
         print("[FAIL] import uhd:", exc)
-        print("        Убедитесь, что установлен UHD-инсталлятор (UHD_PKG_PATH)")
-        print("        и модуль uhd: pip install uhd==<версия>")
+        if sys.platform.startswith("win"):
+            print("        Нужен UHD-инсталлятор (задаёт UHD_PKG_PATH) и wheel:")
+            print("        pip install uhd==<версия инсталлятора>")
+        else:
+            print("        Нужны пакеты UHD: sudo apt install libuhd-dev \\")
+            print("        uhd-host python3-uhd")
+            print("        venv должен видеть системный python3-uhd:")
+            print("        python3 -m venv --system-site-packages .venv")
         return 2
 
     print(f"[ OK ] UHD Python API: {getattr(uhd, '__version__', '?')}")
