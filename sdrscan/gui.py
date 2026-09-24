@@ -59,6 +59,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._selected_peak: dict | None = None
         self._table_rows: list[dict] = []
 
+        # Кэш применённых диапазонов осей: чтобы график не «дёргался» каждый кадр.
+        self._x_applied_hz: tuple[float, float] | None = None
+        self._y_range_applied: tuple[float, float] | None = None
+
         self._build_ui()
         self._build_toolbar()
         self._build_status_bar()
@@ -244,6 +248,7 @@ class MainWindow(QtWidgets.QMainWindow):
         note = preset.note or preset.name
         if hi < preset.stop_hz or lo > preset.start_hz:
             note += " (обрезано до полосы B210)"
+        self._apply_display_span(force=True)
         self.statusBar().showMessage(
             f"Диапазон: {dsp.format_freq(lo)} .. {dsp.format_freq(hi)} | {note}"
         )
@@ -536,6 +541,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.gnss_plot.setLabel("left", "Уровень", units="дБ")
         self.gnss_plot.setLabel("bottom", "Отсчёт")
         self.gnss_plot.showGrid(x=True, y=True, alpha=0.3)
+        for axis in ("bottom", "left"):
+            try:
+                self.gnss_plot.getAxis(axis).enableAutoSIPrefix(False)
+            except Exception:
+                pass
         self.gnss_plot.addLegend()
         self.gnss_noise_curve = self.gnss_plot.plot(
             pen=pg.mkPen("#7dd3fc", width=1), name="Шумовой порог"
@@ -569,6 +579,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.setDownsampling(auto=True, mode="peak")
         self.spectrum_plot.setClipToView(True)
         self.spectrum_plot.enableAutoRange(axis="y", enable=False)
+        for axis in ("bottom", "left"):
+            try:
+                # Отключаем авто-приставки СИ: иначе 1000 МГц подписывается
+                # как «1 kМГц» (1000 МГц = 1 кМГц), и ось путает.
+                self.spectrum_plot.getAxis(axis).enableAutoSIPrefix(False)
+            except Exception:
+                pass
+        try:
+            # Ручной зум/сдвиг мышью выключает авто-масштаб (см. обработчик).
+            self.spectrum_plot.getViewBox().sigRangeChangedManually.connect(
+                self._on_manual_view_change
+            )
+        except Exception:
+            pass
         try:
             # Левая кнопка мыши — выделение области («рамка») для увеличения.
             self.spectrum_plot.getViewBox().setMouseMode(pg.ViewBox.RectMode)
@@ -593,6 +617,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.selected_line.setVisible(False)
         self.spectrum_plot.addItem(self.selected_line, ignoreBounds=True)
         self.spectrum_plot.scene().sigMouseClicked.connect(self._on_plot_clicked)
+
+        # Курсор-«прицел»: показывает частоту и уровень под мышью.
+        self.readout_line = pg.InfiniteLine(
+            angle=90, movable=False,
+            pen=pg.mkPen("#8899aa", style=QtCore.Qt.DotLine, width=1),
+        )
+        self.readout_line.setVisible(False)
+        self.spectrum_plot.addItem(self.readout_line, ignoreBounds=True)
+        self.readout_text = pg.TextItem(
+            color="#e6edf5", anchor=(0.0, 1.0),
+            fill=pg.mkBrush(10, 10, 18, 210), border=pg.mkPen("#8899aa"),
+        )
+        self.readout_text.setVisible(False)
+        self.spectrum_plot.addItem(self.readout_text, ignoreBounds=True)
+        self._mouse_proxy = pg.SignalProxy(
+            self.spectrum_plot.scene().sigMouseMoved,
+            rateLimit=30,
+            slot=self._on_mouse_moved,
+        )
 
         self.waterfall = WaterfallWidget(rows=300)
         splitter.addWidget(self.spectrum_plot)
@@ -732,8 +775,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.threshold_spin.valueChanged.connect(self._refresh_peaks)
         self.ymin_spin.valueChanged.connect(self._refresh_y_range)
         self.ymax_spin.valueChanged.connect(self._refresh_y_range)
-        self.auto_y_check.toggled.connect(self._refresh_y_range)
+        self.auto_y_check.toggled.connect(self._on_auto_y_toggled)
         self.auto_x_check.toggled.connect(self._on_auto_x_toggled)
+        for spin in (self.start_spin, self.stop_spin, self.center_spin):
+            spin.valueChanged.connect(self._on_span_changed)
+        self.rate_spin.valueChanged.connect(self._on_span_changed)
+        self.mode_combo.currentIndexChanged.connect(self._on_span_changed)
         self.wf_lo_spin.valueChanged.connect(self._refresh_wf_levels)
         self.wf_hi_spin.valueChanged.connect(self._refresh_wf_levels)
         self.wf_rows_spin.valueChanged.connect(
@@ -763,6 +810,7 @@ class MainWindow(QtWidgets.QMainWindow):
         old_f = units.factor(self._freq_unit)
         new_f = units.factor(new)
         values_hz = [spec["spin"].value() * old_f for spec in self._freq_spins]
+        view_x = self.spectrum_plot.getViewBox().viewRange()[0]
 
         self._freq_unit = new
         dec = units.decimals(new)
@@ -778,6 +826,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spectrum_plot.setLabel("bottom", "Частота", units=new)
         self.waterfall.set_unit(new, new_f)
         self._apply_view_limits()
+
+        # Переносим текущий масштаб в новую единицу, чтобы вид не «прыгал».
+        self._x_applied_hz = None
+        self._y_range_applied = None
+        if self.auto_x_check.isChecked():
+            self._apply_display_span(force=True)
+        else:
+            self.spectrum_plot.setXRange(
+                float(view_x[0]) * old_f / new_f,
+                float(view_x[1]) * old_f / new_f,
+                padding=0.0,
+            )
 
         if self._last_psd.size:
             self._on_spectrum(self._last_freqs, self._last_psd)
@@ -863,6 +923,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._on_stop()
         self.waterfall.clear()
+        self._x_applied_hz = None
+        self._y_range_applied = None
+        if self.auto_x_check.isChecked():
+            span = self._display_span_hz()
+            if span is not None:
+                f = units.factor(self._freq_unit) or 1.0
+                self.spectrum_plot.setXRange(
+                    span[0] / f, span[1] / f, padding=0.01
+                )
+                self._x_applied_hz = span
+                self.waterfall.set_auto_span(span[0], span[1])
         self._reset_tracks()
         self._last_peak_time = 0.0
         self._gnss_monitor.reset()
@@ -1007,6 +1078,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._gnss_hist_noise.clear()
         self._gnss_hist_power.clear()
 
+        # Показываем в настройках реальные параметры файла, чтобы ось X
+        # соответствовала записи.
+        self._set_spin_hz(self.center_spin, center)
+        rate_mhz = rate / 1e6
+        if self.rate_spin.minimum() <= rate_mhz <= self.rate_spin.maximum():
+            self.rate_spin.setValue(rate_mhz)
+        self._x_applied_hz = None
+        self._on_span_changed()
+
         cfg = self._build_config()
         gnss = cfg.mode == "gnss"
         if gnss:
@@ -1041,6 +1121,114 @@ class MainWindow(QtWidgets.QMainWindow):
         self.statusBar().showMessage(text)
         QtWidgets.QMessageBox.critical(self, "Ошибка", text)
 
+    # ------------------------------------------------------------------
+    # Диапазон оси X и курсор
+    # ------------------------------------------------------------------
+    def _display_span_hz(self) -> tuple[float, float] | None:
+        """Настроенный диапазон отображения (без учёта принятых данных)."""
+        if self.mode_combo.currentData() == "sweep":
+            lo, hi = self._hz_of(self.start_spin), self._hz_of(self.stop_spin)
+        else:
+            center = self._hz_of(self.center_spin)
+            half = self.rate_spin.value() * 1e6 / 2.0
+            lo, hi = center - half, center + half
+        lo = max(lo, MIN_B210_FREQ)
+        hi = min(hi, MAX_B210_FREQ)
+        if hi <= lo:
+            return None
+        return lo, hi
+
+    def _display_target_hz(self) -> tuple[float, float] | None:
+        """Что показывать по X: настроенный диапазон, иначе — по данным."""
+        data_span = None
+        if self._last_freqs.size > 1:
+            data_span = (float(self._last_freqs[0]), float(self._last_freqs[-1]))
+        span = self._display_span_hz()
+        if span is not None and data_span is not None:
+            if span[0] <= data_span[0] and data_span[1] <= span[1]:
+                return span
+            return data_span
+        return span if span is not None else data_span
+
+    def _apply_display_span(self, force: bool = False) -> None:
+        """Стабилизировать масштаб по X.
+
+        Ось привязана к настроенному диапазону (Начало..Конец или центр ±
+        полоса), а не к «растущим» данным свипа, поэтому она не проматывается.
+        Повторно ``setXRange`` вызывается только при заметном изменении.
+        """
+        if self._paused:
+            return
+        target = self._display_target_hz()
+        if target is None:
+            return
+        if self.auto_x_check.isChecked():
+            prev = self._x_applied_hz
+            width = max(target[1] - target[0], 1.0)
+            stale = (
+                prev is None
+                or abs(prev[0] - target[0]) > 0.005 * width
+                or abs(prev[1] - target[1]) > 0.005 * width
+            )
+            if force or stale:
+                f = units.factor(self._freq_unit) or 1.0
+                self.spectrum_plot.setXRange(
+                    target[0] / f, target[1] / f, padding=0.01
+                )
+                self._x_applied_hz = target
+        self.waterfall.set_auto_span(target[0], target[1])
+
+    def _on_span_changed(self, *_args) -> None:
+        """Изменились настройки частот — обновляем диапазон оси."""
+        self._apply_display_span(force=True)
+
+    def _on_manual_view_change(self, *_args) -> None:
+        """Пользователь сам подвинул/приблизил график мышью."""
+        changed = False
+        for check in (self.auto_x_check, self.auto_y_check):
+            if check.isChecked():
+                check.blockSignals(True)
+                check.setChecked(False)
+                check.blockSignals(False)
+                changed = True
+        self._x_applied_hz = None
+        self._y_range_applied = None
+        if changed:
+            self.statusBar().showMessage(
+                "Ручной масштаб: автомасштаб выключен, "
+                "кнопка «Сброс вида» вернёт его."
+            )
+
+    def _on_auto_y_toggled(self, checked: bool) -> None:
+        self._y_range_applied = None
+        self._refresh_y_range()
+
+    def _on_mouse_moved(self, evt) -> None:
+        """Показать частоту и уровень под курсором."""
+        if self._last_freqs.size == 0 or self._last_psd.size != self._last_freqs.size:
+            return
+        pos = evt[0]
+        if not self.spectrum_plot.sceneBoundingRect().contains(pos):
+            self.readout_line.setVisible(False)
+            self.readout_text.setVisible(False)
+            return
+        point = self.spectrum_plot.getViewBox().mapSceneToView(pos)
+        f = units.factor(self._freq_unit) or 1.0
+        hz = float(point.x()) * f
+        idx = int(np.searchsorted(self._last_freqs, hz))
+        idx = min(max(idx, 0), self._last_freqs.size - 1)
+        if idx > 0 and abs(self._last_freqs[idx - 1] - hz) < abs(
+            self._last_freqs[idx] - hz
+        ):
+            idx -= 1
+        freq = float(self._last_freqs[idx])
+        level = float(self._last_psd[idx])
+        self.readout_line.setPos(freq / f)
+        self.readout_line.setVisible(True)
+        self.readout_text.setText(f"{self._fmt_freq(freq)}\n{level:.1f} дБ")
+        self.readout_text.setPos(freq / f, level)
+        self.readout_text.setVisible(True)
+
     def _on_spectrum(self, freqs, psd) -> None:
         freqs = np.asarray(freqs, dtype=np.float64)
         psd = np.asarray(psd, dtype=np.float64)
@@ -1053,10 +1241,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         f = units.factor(self._freq_unit) or 1.0
         self.curve.setData(freqs / f, psd)
-        if self.auto_x_check.isChecked() and freqs.size > 1:
-            self.spectrum_plot.setXRange(
-                float(freqs[0]) / f, float(freqs[-1]) / f, padding=0.01
-            )
+        self._apply_display_span()
         self._refresh_y_range()
 
         now = time.monotonic()
@@ -1073,35 +1258,51 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_y_range(self) -> None:
         if self._last_psd.size == 0:
             return
-        if self.auto_y_check.isChecked():
-            lo = float(np.percentile(self._last_psd, 5)) - 5.0
-            hi = float(np.max(self._last_psd)) + 5.0
-            lo = max(lo, -200.0)
-            hi = min(hi, 50.0)
-            if hi - lo < 20.0:
-                hi = lo + 20.0
+        if not self.auto_y_check.isChecked():
+            lo = float(self.ymin_spin.value())
+            hi = float(self.ymax_spin.value())
             self.spectrum_plot.setYRange(lo, hi, padding=0.0)
-        else:
-            self.spectrum_plot.setYRange(
-                self.ymin_spin.value(), self.ymax_spin.value(), padding=0.0
-            )
+            self._y_range_applied = (lo, hi)
+            return
+
+        data_lo = float(np.percentile(self._last_psd, 5))
+        data_hi = float(np.max(self._last_psd))
+        lo = data_lo - 5.0
+        hi = data_hi + 5.0
+        prev = self._y_range_applied
+        if prev is not None:
+            plo, phi = prev
+            # Держим прежнюю «рамку», пока данные в неё вписываются и она не
+            # слишком просторная: так график не дёргается каждый кадр.
+            if (
+                plo <= data_lo
+                and data_hi <= phi
+                and (phi - plo) <= 3.0 * max(10.0, data_hi - data_lo)
+            ):
+                lo, hi = plo, phi
+        lo = max(lo, -200.0)
+        hi = min(hi, 50.0)
+        if hi - lo < 20.0:
+            hi = lo + 20.0
+        if prev is not None and abs(prev[0] - lo) < 1e-6 and abs(prev[1] - hi) < 1e-6:
+            return
+        self.spectrum_plot.setYRange(lo, hi, padding=0.0)
+        self._y_range_applied = (lo, hi)
 
     def _on_auto_x_toggled(self, checked: bool) -> None:
         if checked:
             self._reset_view()
 
     def _reset_view(self) -> None:
-        f = units.factor(self._freq_unit) or 1.0
-        self.auto_x_check.blockSignals(True)
-        self.auto_x_check.setChecked(True)
-        self.auto_x_check.blockSignals(False)
-        if self._last_freqs.size > 1:
-            self.spectrum_plot.setXRange(
-                float(self._last_freqs[0]) / f, float(self._last_freqs[-1]) / f,
-                padding=0.01,
-            )
-        self._refresh_y_range()
+        self._x_applied_hz = None
+        self._y_range_applied = None
+        for check in (self.auto_x_check, self.auto_y_check):
+            check.blockSignals(True)
+            check.setChecked(True)
+            check.blockSignals(False)
         self.waterfall.reset_view()
+        self._apply_display_span(force=True)
+        self._refresh_y_range()
 
     def _refresh_wf_levels(self) -> None:
         self.waterfall.set_levels(self.wf_lo_spin.value(), self.wf_hi_spin.value())
@@ -1381,8 +1582,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _data_span_view(self) -> tuple[float, float]:
         f = units.factor(self._freq_unit) or 1.0
-        if self._last_freqs.size > 1:
-            return float(self._last_freqs[0]) / f, float(self._last_freqs[-1]) / f
+        target = self._display_target_hz()
+        if target is not None:
+            return target[0] / f, target[1] / f
         return MIN_B210_FREQ / f, MAX_B210_FREQ / f
 
     def _set_manual_x(self, lo: float, hi: float) -> None:
@@ -1407,6 +1609,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if hi > d1:
             hi, lo = d1, d1 - span
         self._set_manual_x(lo, hi)
+        self._x_applied_hz = None
+        self.waterfall.set_x_span(lo * f, hi * f)
         if not self.auto_y_check.isChecked():
             yc = 0.5 * (y0 + y1)
             self.spectrum_plot.setYRange(

@@ -29,6 +29,12 @@ class WaterfallWidget(QtWidgets.QWidget):
         self.unit_name = "МГц"
         self.unit_factor = 1e6
         self._view_locked = False
+        # Диапазон, заданный приложением (настройками), в герцах.
+        self._auto_span_hz: tuple[float, float] | None = None
+        # Ручной зум (кнопка «К пику» или мышь), тоже в герцах.
+        self._locked_span_hz: tuple[float, float] | None = None
+        # Что реально применено к setXRange: чтобы не дёргать масштаб зря.
+        self._applied_hz: tuple[float, float] | None = None
 
         self.glw = pg.GraphicsLayoutWidget()
         self.plot = self.glw.addPlot(row=0, col=0)
@@ -37,6 +43,20 @@ class WaterfallWidget(QtWidgets.QWidget):
         self.plot.invertY(True)          # строка 0 - сверху (свежие данные)
         self.plot.showGrid(x=True, y=False, alpha=0.2)
         self.plot.getAxis("left").setStyle(showValues=False)
+        for axis in ("bottom", "left"):
+            try:
+                # Отключаем авто-приставки СИ: иначе pyqtgraph подписывает
+                # 1000 МГц как «1 kМГц», что путает.
+                self.plot.getAxis(axis).enableAutoSIPrefix(False)
+            except Exception:
+                pass
+        try:
+            # Ручной сдвиг/зум мышью фиксирует вид, пока не нажат «Сброс вида».
+            self.plot.getViewBox().sigRangeChangedManually.connect(
+                self._on_manual_range
+            )
+        except Exception:
+            pass
 
         self.image = pg.ImageItem(axisOrder="row-major")
         self.plot.addItem(self.image)
@@ -93,7 +113,7 @@ class WaterfallWidget(QtWidgets.QWidget):
         except Exception:
             pass
         self._apply_limits()
-        self._update_rect()
+        self._sync_x(force=True)
 
     def set_levels(self, low: float, high: float) -> None:
         self._levels = (float(low), float(high))
@@ -114,12 +134,16 @@ class WaterfallWidget(QtWidgets.QWidget):
         self.image.clear()
         self._hz0, self._hz1 = 0.0, 1.0
         self._view_locked = False
+        self._auto_span_hz = None
+        self._locked_span_hz = None
+        self._applied_hz = None
         self.plot.setXRange(0.0, 1.0, padding=0.0)
 
     def reset_view(self) -> None:
         """Вернуть исходный масштаб по частоте (снять ручной зум)."""
         self._view_locked = False
-        self._update_rect()
+        self._locked_span_hz = None
+        self._sync_x(force=True)
 
     @property
     def view_locked(self) -> bool:
@@ -132,16 +156,72 @@ class WaterfallWidget(QtWidgets.QWidget):
         Пока ручной зум включён, новые строки водопада не меняют масштаб.
         Снимается кнопкой «Сброс вида».
         """
-        if not (hi_hz > lo_hz):
+        span = self._clamp_span(lo_hz, hi_hz)
+        if span is None:
             return
-        lo = min(max(float(lo_hz), 70e6), 6e9)
-        hi = min(max(float(hi_hz), 70e6), 6e9)
-        if not (hi > lo):
-            return
-        f = self.unit_factor or 1.0
+        self._locked_span_hz = span
         self._view_locked = True
         self._apply_limits()
-        self.plot.setXRange(lo / f, hi / f, padding=0.0)
+        self._sync_x(force=True)
+
+    def set_auto_span(self, lo_hz: float, hi_hz: float) -> None:
+        """Задать участок, который водопад показывает по умолчанию.
+
+        Пока пользователь не приблизил вид вручную, водопад показывает
+        именно этот диапазон, а не «растущие» по мере свипа данные.
+        """
+        span = self._clamp_span(lo_hz, hi_hz)
+        if span is None or self._auto_span_hz == span:
+            return
+        self._auto_span_hz = span
+        self._apply_limits()
+        self._sync_x()
+
+    @staticmethod
+    def _clamp_span(lo_hz: float, hi_hz: float) -> tuple[float, float] | None:
+        try:
+            lo = float(lo_hz)
+            hi = float(hi_hz)
+        except (TypeError, ValueError):
+            return None
+        if not (hi > lo):
+            return None
+        lo = min(max(lo, 70e6), 6e9)
+        hi = min(max(hi, 70e6), 6e9)
+        if hi <= lo:
+            return None
+        return lo, hi
+
+    def _on_manual_range(self, *_args) -> None:
+        """Пользователь сам подвинул/приблизил вид мышью - фиксируем диапазон."""
+        f = self.unit_factor or 1.0
+        x0, x1 = self.plot.getViewBox().viewRange()[0]
+        self._view_locked = True
+        self._locked_span_hz = (float(x0) * f, float(x1) * f)
+        self._applied_hz = self._locked_span_hz
+
+    def _sync_x(self, force: bool = False) -> None:
+        """Применить нужный диапазон по частоте (с гистерезисом)."""
+        span = self._locked_span_hz or self._auto_span_hz
+        if span is None:
+            if self._hz1 > self._hz0:
+                span = (self._hz0, self._hz1)
+            else:
+                return
+        span = self._clamp_span(*span)
+        if span is None:
+            return
+        prev = self._applied_hz
+        if not force and prev is not None:
+            width = max(span[1] - span[0], 1.0)
+            if (
+                abs(prev[0] - span[0]) <= 0.005 * width
+                and abs(prev[1] - span[1]) <= 0.005 * width
+            ):
+                return
+        f = self.unit_factor or 1.0
+        self.plot.setXRange(span[0] / f, span[1] / f, padding=0.0)
+        self._applied_hz = span
 
     def _update_rect(self) -> None:
         f = self.unit_factor
@@ -150,8 +230,7 @@ class WaterfallWidget(QtWidgets.QWidget):
         if x1 <= x0:
             x1 = x0 + 1.0
         self.image.setRect(QtCore.QRectF(x0, 0.0, x1 - x0, float(self.rows)))
-        if not self._view_locked:
-            self.plot.setXRange(x0, x1, padding=0.0)
+        self._sync_x()
 
     def add_row(self, freqs_hz: np.ndarray, psd_db: np.ndarray) -> None:
         f = np.asarray(freqs_hz, dtype=np.float64)
@@ -165,9 +244,21 @@ class WaterfallWidget(QtWidgets.QWidget):
             or self._data.shape[1] != p.size
         )
         if need_new:
-            self._data = np.full(
+            buf = np.full(
                 (self.rows, p.size), float(self._levels[0]), dtype=np.float32
             )
+            # Если строка стала длиннее — это тот же свип: старые строки
+            # прижаты влево (свип идёт от начала диапазона вверх), сохраняем их.
+            # Если короче — начался новый свип, буфер обнуляем.
+            grew = (
+                self._data is not None
+                and self._data.shape[0] == self.rows
+                and self._data.shape[1] < p.size
+            )
+            if grew:
+                buf[:, : self._data.shape[1]] = self._data
+                buf[1:] = buf[:-1]
+            self._data = buf
             if f.size:
                 self._hz0, self._hz1 = float(f[0]), float(f[-1])
                 self._update_rect()
