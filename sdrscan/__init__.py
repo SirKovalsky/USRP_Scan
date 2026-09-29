@@ -23,9 +23,5 @@ PyQt5/pyqtgraph. На Linux этот порядок не обязателен, �
 
 __version__ = "0.1.0"
 
-# Предзагрузка UHD до Qt (см. пояснение в docstring). Ошибка импорта не критична:
-# без UHD приложение всё равно запустится и покажет понятное сообщение.
-try:  # pragma: no cover - зависит от окружения
-    import uhd as _uhd  # noqa: F401
-except Exception:  # noqa: BLE001
-    pass
+# UHD обязателен для работы ПО. Импорт выполняется до Qt (см. пояснение выше).
+import uhd as _uhd  # noqa: F401

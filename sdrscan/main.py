@@ -6,7 +6,7 @@ import argparse
 import sys
 
 from .config import AcquisitionConfig
-from .device import uhd_available, uhd_version
+from .device import uhd_version
 
 # ВАЖНО: модуль uhd уже предзагружен в sdrscan/__init__.py ДО библиотек Qt.
 # Импорты PyQt5/pyqtgraph выполняются лениво, только когда нужен GUI, чтобы
@@ -70,9 +70,6 @@ def main(argv: list[str] | None = None) -> int:
     print(f"UHD: {uhd_version()}")
 
     if args.list_devices:
-        if not uhd_available():
-            print("Модуль 'uhd' не установлен. См. README.md.")
-            return 2
         from .device import list_devices
         try:
             found = list_devices(args.device_args or "")

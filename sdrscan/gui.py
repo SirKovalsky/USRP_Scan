@@ -13,7 +13,7 @@ from PyQt5 import QtCore, QtWidgets
 
 from . import annotate, dsp, offline, presets, units
 from .config import MAX_B210_FREQ, MIN_B210_FREQ, AcquisitionConfig
-from .device import list_devices, uhd_available, uhd_version
+from .device import list_devices, uhd_version
 from .gnss import STATUS_COLOR, STATUS_TEXT, GnssMonitor
 from .waterfall import WaterfallWidget
 from .worker import AcquisitionWorker, OfflineWorker
@@ -885,12 +885,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.act_record.blockSignals(False)
 
     def _on_find(self) -> None:
-        if not uhd_available():
-            QtWidgets.QMessageBox.critical(
-                self, "UHD не найден",
-                "Модуль 'uhd' не установлен. См. README.md, раздел «Установка UHD».",
-            )
-            return
         try:
             found = list_devices(self.device_args_edit.text().strip())
         except Exception as exc:
@@ -913,14 +907,6 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             QtWidgets.QMessageBox.warning(self, "Проверьте параметры", str(exc))
             return
-        if not uhd_available():
-            QtWidgets.QMessageBox.critical(
-                self, "UHD не найден",
-                "Модуль 'uhd' не установлен, устройство недоступно.\n"
-                "См. README.md, раздел «Установка UHD».",
-            )
-            return
-
         self._on_stop()
         self.waterfall.clear()
         self._x_applied_hz = None

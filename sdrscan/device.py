@@ -1,55 +1,23 @@
 """Обёртка над UHD (MultiUSRP) для USRP B210.
 
-Модуль импортирует ``uhd`` лениво, чтобы приложение можно было запустить
-(и увидеть понятную ошибку) даже там, где UHD ещё не установлен.
+UHD обязателен для работы ПО.
 """
 
 from __future__ import annotations
 
-import sys
 import threading
 from typing import Any
 
 import numpy as np
+import uhd
 
 
 class DeviceError(RuntimeError):
     """Ошибка работы с SDR-устройством."""
 
 
-if sys.platform.startswith("win"):
-    _UHD_HINT = (
-        "Не удалось импортировать модуль 'uhd'. Установите UHD:\n"
-        "  1) UHD-инсталлятор для Windows (он задаёт UHD_PKG_PATH и ставит uhd.dll)\n"
-        "  2) pip install uhd==<версия из uhd_config_info.exe --version>\n"
-        "Подробности - в README.md, раздел «Установка UHD»."
-    )
-else:
-    _UHD_HINT = (
-        "Не удалось импортировать модуль 'uhd'. Установите UHD:\n"
-        "  sudo apt install libuhd-dev uhd-host python3-uhd\n"
-        "  sudo uhd_images_downloader\n"
-        "Виртуальное окружение должно видеть системный пакет python3-uhd\n"
-        "(python -m venv --system-site-packages .venv).\n"
-        "Либо соберите UHD из исходников: https://github.com/EttusResearch/uhd\n"
-        "Подробности - в README.md, раздел «Установка UHD (Linux)»."
-    )
-
-
-def uhd_available() -> bool:
-    """True, если модуль uhd импортируется."""
-    try:
-        import uhd  # noqa: F401
-    except Exception:
-        return False
-    return True
-
-
 def uhd_version() -> str:
-    try:
-        import uhd
-    except Exception:
-        return "не установлен"
+    """Версия библиотеки UHD."""
     try:
         return str(uhd.__version__)
     except Exception:
@@ -58,10 +26,6 @@ def uhd_version() -> str:
 
 def list_devices(args: str = "") -> list[dict]:
     """Найти подключённые USRP (может вернуть пустой список)."""
-    try:
-        import uhd
-    except Exception as exc:  # pragma: no cover
-        raise DeviceError(_UHD_HINT) from exc
     try:
         found = uhd.find(args)
         return [dict(d) for d in found]
@@ -73,11 +37,6 @@ class USRPDevice:
     """Тонкая обёртка вокруг ``uhd.usrp.MultiUSRP`` для одного RX-канала."""
 
     def __init__(self, args: str = "type=b200", channel: int = 0) -> None:
-        try:
-            import uhd
-        except Exception as exc:
-            raise DeviceError(_UHD_HINT) from exc
-
         self._uhd = uhd
         self.args = args
         self.channel = int(channel)
